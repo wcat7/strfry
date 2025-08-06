@@ -1,4 +1,5 @@
 #include "RelayServer.h"
+#include "TenantManager.h"
 
 
 void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
@@ -102,6 +103,14 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, uint64_t connId, flat_has
     parseAndVerifyEvent(origJson, secpCtx, true, true, packedStr, jsonStr);
 
     PackedEventView packed(packedStr);
+    
+    // Check tenant access control
+    std::string eventPubkey = std::string(packed.pubkey());
+    if (!g_tenantManager.canWriteToTenant(subdomain, eventPubkey)) {
+        LI << "Access denied: pubkey " << eventPubkey << " cannot write to tenant " << subdomain;
+        sendOKResponse(connId, to_hex(packed.id()), false, "restricted: access denied to this tenant");
+        return;
+    }
 
     {
         bool foundProtected = false;
@@ -166,6 +175,10 @@ void RelayServer::ingesterProcessReq(lmdb::txn &txn, uint64_t connId, std::strin
     if (arr.get_array().size() < 2 + 1) throw herr("arr too small");
     if (arr.get_array().size() > 2 + cfg().relay__maxReqFilterSize) throw herr("arr too big");
 
+    // For now, allow all REQ requests (read access)
+    // In the future, we can add authentication to check if user can read from tenant
+    // For now, we only control write access (EVENT messages)
+    
     Subscription sub(connId, jsonGetString(arr[1], "REQ subscription id was not a string"), NostrFilterGroup(arr), subdomain);
 
     tpReqWorker.dispatch(connId, MsgReqWorker{MsgReqWorker::NewSub{std::move(sub), subdomain}});

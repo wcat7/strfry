@@ -13,6 +13,7 @@
 #include <tao/json.hpp>
 
 #include "golpe.h"
+#include "TenantManager.h"
 
 #include "Subscription.h"
 #include "ThreadPool.h"

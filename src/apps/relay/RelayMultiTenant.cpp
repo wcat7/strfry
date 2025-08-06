@@ -1,4 +1,5 @@
 #include "RelayServer.h"
+#include "TenantManager.h"
 #include <filesystem>
 #include <algorithm>
 
@@ -73,6 +74,17 @@ defaultDb::environment& RelayServer::getTenantEnv(const std::string& subdomain) 
     auto it = tenantEnvs.find(subdomain);
     if (it != tenantEnvs.end()) {
         return *it->second;
+    }
+    
+    // Check if tenant exists in tenant manager (for non-default tenants)
+    if (subdomain != "default") {
+        Tenant* tenant = g_tenantManager.getTenant(subdomain);
+        if (!tenant) {
+            // Tenant doesn't exist in manager, create it automatically
+            // This allows backward compatibility with existing tenants
+            tenant = g_tenantManager.createTenant(subdomain, "", subdomain, "Auto-created tenant", 0);
+            LI << "Auto-created tenant: " << subdomain;
+        }
     }
     
     // Create new tenant database

@@ -34,6 +34,13 @@ void RelayServer::run() {
         int s = pthread_sigmask(SIG_BLOCK, &set, NULL);
         if (s != 0) throw herr("Unable to set sigmask: ", strerror(errno));
     }
+    
+    // Initialize tenant manager with database
+    auto& defaultEnv = getTenantEnv("default");
+    g_tenantManager.setDatabase(&defaultEnv);
+    g_tenantManager.loadFromDatabase();
+    
+    LI << "Tenant manager initialized and loaded from database";
 
     tpWebsocket.init("Websocket", 1, [this](auto &thr){
         runWebsocket(thr);

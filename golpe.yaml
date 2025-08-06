@@ -82,6 +82,13 @@ tables:
       - name: filter
         type: string
 
+  Tenant:
+    fields:
+      - name: tenant_id
+        type: string
+      - name: tenant_data
+        type: string
+
 tablesRaw:
   ## Raw nostr event JSON, possibly compressed
   ## keys are levIds
