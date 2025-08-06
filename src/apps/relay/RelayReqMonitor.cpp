@@ -5,32 +5,46 @@
 
 
 void RelayServer::runReqMonitor(ThreadPool<MsgReqMonitor>::Thread &thr) {
-    auto dbChangeWatcher = hoytech::file_change_monitor(dbDir + "/data.mdb");
-
-    dbChangeWatcher.setDebounce(100);
-
-    dbChangeWatcher.run([&](){
-        tpReqMonitor.dispatchToAll([]{ return MsgReqMonitor{MsgReqMonitor::DBChange{}}; });
-    });
-
-
+    // Multi-tenant monitors - one per subdomain
+    std::unordered_map<std::string, std::unique_ptr<ActiveMonitors>> monitorsBySubdomain;
+    std::unordered_map<std::string, uint64_t> currEventIds;
+    std::unordered_map<std::string, std::unique_ptr<hoytech::file_change_monitor>> dbChangeWatchers;
+    
     Decompressor decomp;
-    ActiveMonitors monitors;
-    uint64_t currEventId = MAX_U64;
 
     while (1) {
         auto newMsgs = thr.inbox.pop_all();
 
-        auto txn = env.txn_ro();
-
-        uint64_t latestEventId = getMostRecentLevId(txn);
-        if (currEventId > latestEventId) currEventId = latestEventId;
-
         for (auto &newMsg : newMsgs) {
             if (auto msg = std::get_if<MsgReqMonitor::NewSub>(&newMsg.msg)) {
                 auto connId = msg->sub.connId;
+                auto& subdomain = msg->subdomain;
+                
+                // Get or create monitor for this subdomain
+                auto& monitors = monitorsBySubdomain[subdomain];
+                if (!monitors) {
+                    monitors = std::make_unique<ActiveMonitors>();
+                    currEventIds[subdomain] = MAX_U64;
+                    
+                    // Create DB change watcher for this subdomain
+                    auto& tenantEnv = getTenantEnv(subdomain);
+                    std::string tenantDbPath = dbDir + "/tenants/" + subdomain + "/data.mdb";
+                    dbChangeWatchers[subdomain] = std::make_unique<hoytech::file_change_monitor>(tenantDbPath);
+                    dbChangeWatchers[subdomain]->setDebounce(100);
+                    
+                    // Start watching for DB changes
+                    dbChangeWatchers[subdomain]->run([&, subdomain](){
+                        tpReqMonitor.dispatchToAll([subdomain]{ return MsgReqMonitor{MsgReqMonitor::DBChange{subdomain}}; });
+                    });
+                }
+                
+                auto& tenantEnv = getTenantEnv(subdomain);
+                auto txn = tenantEnv.txn_ro();
+                
+                uint64_t latestEventId = getMostRecentLevId(txn);
+                if (currEventIds[subdomain] > latestEventId) currEventIds[subdomain] = latestEventId;
 
-                env.foreach_Event(txn, [&](auto &ev){
+                tenantEnv.foreach_Event(txn, [&](auto &ev){
                     if (msg->sub.filterGroup.doesMatch(PackedEventView(ev.buf))) {
                         sendEvent(connId, msg->sub.subId, getEventJson(txn, decomp, ev.primaryKeyId));
                     }
@@ -40,22 +54,38 @@ void RelayServer::runReqMonitor(ThreadPool<MsgReqMonitor>::Thread &thr) {
 
                 msg->sub.latestEventId = latestEventId;
 
-                if (!monitors.addSub(txn, std::move(msg->sub), latestEventId)) {
+                if (!monitors->addSub(txn, std::move(msg->sub), latestEventId)) {
                     sendNoticeError(connId, std::string("too many concurrent REQs"));
                 }
             } else if (auto msg = std::get_if<MsgReqMonitor::RemoveSub>(&newMsg.msg)) {
-                monitors.removeSub(msg->connId, msg->subId);
+                // Find which subdomain this subscription belongs to
+                for (auto& [subdomain, monitors] : monitorsBySubdomain) {
+                    monitors->removeSub(msg->connId, msg->subId);
+                }
             } else if (auto msg = std::get_if<MsgReqMonitor::CloseConn>(&newMsg.msg)) {
-                monitors.closeConn(msg->connId);
-            } else if (std::get_if<MsgReqMonitor::DBChange>(&newMsg.msg)) {
-                env.foreach_Event(txn, [&](auto &ev){
-                    monitors.process(txn, ev, [&](RecipientList &&recipients, uint64_t levId){
-                        sendEventToBatch(std::move(recipients), std::string(getEventJson(txn, decomp, levId)));
-                    });
-                    return true;
-                }, false, currEventId + 1);
+                // Close connection in all subdomains
+                for (auto& [subdomain, monitors] : monitorsBySubdomain) {
+                    monitors->closeConn(msg->connId);
+                }
+            } else if (auto msg = std::get_if<MsgReqMonitor::DBChange>(&newMsg.msg)) {
+                auto& subdomain = msg->subdomain;
+                auto it = monitorsBySubdomain.find(subdomain);
+                if (it != monitorsBySubdomain.end()) {
+                    auto& monitors = it->second;
+                    auto& tenantEnv = getTenantEnv(subdomain);
+                    auto txn = tenantEnv.txn_ro();
+                    
+                    uint64_t latestEventId = getMostRecentLevId(txn);
+                    
+                    tenantEnv.foreach_Event(txn, [&](auto &ev){
+                        monitors->process(txn, ev, [&](RecipientList &&recipients, uint64_t levId){
+                            sendEventToBatch(std::move(recipients), std::string(getEventJson(txn, decomp, levId)));
+                        });
+                        return true;
+                    }, false, currEventIds[subdomain] + 1);
 
-                currEventId = latestEventId;
+                    currEventIds[subdomain] = latestEventId;
+                }
             }
         }
     }

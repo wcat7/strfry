@@ -58,27 +58,36 @@ void RelayServer::runWriter(ThreadPool<MsgWriter>::Thread &thr) {
 
         if (!newEvents.size()) continue;
 
-        // Do write
+        // Do write - group events by subdomain
+        std::unordered_map<std::string, std::vector<EventToWrite>> eventsBySubdomain;
+        
+        for (auto &newEvent : newEvents) {
+            MsgWriter::AddEvent *addEventMsg = static_cast<MsgWriter::AddEvent*>(newEvent.userData);
+            eventsBySubdomain[addEventMsg->subdomain].emplace_back(std::move(newEvent));
+        }
+        
+        for (auto &[subdomain, events] : eventsBySubdomain) {
+            try {
+                auto& tenantEnv = getTenantEnv(subdomain);
+                auto txn = tenantEnv.txn_rw();
+                writeEvents(txn, neFilterCache, events);
+                txn.commit();
+            } catch (std::exception &e) {
+                LE << "Error writing " << events.size() << " events for subdomain " << subdomain << ": " << e.what();
 
-        try {
-            auto txn = env.txn_rw();
-            writeEvents(txn, neFilterCache, newEvents);
-            txn.commit();
-        } catch (std::exception &e) {
-            LE << "Error writing " << newEvents.size() << " events: " << e.what();
+                for (auto &newEvent : events) {
+                    PackedEventView packed(newEvent.packedStr);
+                    auto eventIdHex = to_hex(packed.id());
+                    MsgWriter::AddEvent *addEventMsg = static_cast<MsgWriter::AddEvent*>(newEvent.userData);
 
-            for (auto &newEvent : newEvents) {
-                PackedEventView packed(newEvent.packedStr);
-                auto eventIdHex = to_hex(packed.id());
-                MsgWriter::AddEvent *addEventMsg = static_cast<MsgWriter::AddEvent*>(newEvent.userData);
+                    std::string message = "Write error: ";
+                    message += e.what();
 
-                std::string message = "Write error: ";
-                message += e.what();
+                    sendOKResponse(addEventMsg->connId, eventIdHex, false, message);
+                }
 
-                sendOKResponse(addEventMsg->connId, eventIdHex, false, message);
+                continue;
             }
-
-            continue;
         }
 
         // Log

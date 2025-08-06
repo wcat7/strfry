@@ -47,13 +47,15 @@ namespace std {
 
 
 struct Subscription : NonCopyable {
-    Subscription(uint64_t connId_, std::string subId_, NostrFilterGroup filterGroup_) : connId(connId_), subId(subId_), filterGroup(filterGroup_) {}
+    Subscription(uint64_t connId_, std::string subId_, NostrFilterGroup filterGroup_, std::string subdomain_ = "") 
+        : connId(connId_), subId(subId_), filterGroup(filterGroup_), subdomain(subdomain_) {}
 
     // Params
 
     uint64_t connId;
     SubId subId;
     NostrFilterGroup filterGroup;
+    std::string subdomain;  // Add subdomain for multi-tenant support
 
     // State
 

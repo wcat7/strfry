@@ -21,6 +21,10 @@
 extern char **environ;
 #endif
 
+#ifdef __APPLE__
+extern char **environ;
+#endif
+
 
 
 enum class PluginEventSifterResult {
@@ -45,7 +49,11 @@ struct PluginEventSifter {
             if (currPluginCmd.find(' ') == std::string::npos) {
                 struct stat statbuf;
                 if (stat(currPluginCmd.c_str(), &statbuf)) throw herr("couldn't stat plugin: ", currPluginCmd);
+#ifdef __APPLE__
+                lastModTime = statbuf.st_mtimespec;
+#else
                 lastModTime = statbuf.st_mtim;
+#endif
             }
         }
 
@@ -72,7 +80,11 @@ struct PluginEventSifter {
                 } else if (pluginCmd.find(' ') == std::string::npos) {
                     struct stat statbuf;
                     if (stat(pluginCmd.c_str(), &statbuf)) throw herr("couldn't stat plugin: ", pluginCmd);
+#ifdef __APPLE__
+                    if (statbuf.st_mtimespec.tv_sec != running->lastModTime.tv_sec || statbuf.st_mtimespec.tv_nsec != running->lastModTime.tv_nsec) {
+#else
                     if (statbuf.st_mtim.tv_sec != running->lastModTime.tv_sec || statbuf.st_mtim.tv_nsec != running->lastModTime.tv_nsec) {
+#endif
                         running.reset();
                     }
                 }

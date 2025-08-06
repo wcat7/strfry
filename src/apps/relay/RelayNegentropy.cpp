@@ -96,7 +96,7 @@ void RelayServer::runNegentropy(ThreadPool<MsgNegentropy>::Thread &thr) {
         std::string resp;
 
         try {
-            Negentropy ne(storage, 500'000);
+            negentropy::Negentropy<negentropy::StorageBase> ne(storage, 500'000);
             resp = ne.reconcile(msg);
         } catch (std::exception &e) {
             LI << "[" << connId << "] Error parsing negentropy message: " << e.what();
@@ -183,15 +183,18 @@ void RelayServer::runNegentropy(ThreadPool<MsgNegentropy>::Thread &thr) {
     while(1) {
         auto newMsgs = queries.running.empty() ? thr.inbox.pop_all() : thr.inbox.pop_all_no_wait();
 
-        auto txn = env.txn_ro();
-
         for (auto &newMsg : newMsgs) {
             if (auto msg = std::get_if<MsgNegentropy::NegOpen>(&newMsg.msg)) {
                 auto connId = msg->sub.connId;
                 auto subId = msg->sub.subId;
+                auto& subdomain = msg->subdomain;
                 std::optional<uint64_t> treeId;
 
-                env.foreach_NegentropyFilter(txn, [&](auto &f){
+                // Get tenant database for this subdomain
+                auto& tenantEnv = getTenantEnv(subdomain);
+                auto txn = tenantEnv.txn_ro();
+
+                tenantEnv.foreach_NegentropyFilter(txn, [&](auto &f){
                     if (f.filter() == msg->filterStr) {
                         treeId = f.primaryKeyId;
                         return false;
@@ -241,6 +244,10 @@ void RelayServer::runNegentropy(ThreadPool<MsgNegentropy>::Thread &thr) {
                     }
                     handleReconcile(msg->connId, msg->subId, view->storageVector, msg->negPayload);
                 } else if (auto *view = std::get_if<NegentropyViews::StatelessView>(userView)) {
+                    // Get tenant database for this subscription
+                    auto& tenantEnv = getTenantEnv(view->sub.subdomain);
+                    auto txn = tenantEnv.txn_ro();
+                    
                     negentropy::storage::BTreeLMDB storage(txn, negentropyDbi, view->treeId);
 
                     const auto &f = view->sub.filterGroup.filters.at(0);
@@ -256,9 +263,5 @@ void RelayServer::runNegentropy(ThreadPool<MsgNegentropy>::Thread &thr) {
                 views.closeConn(msg->connId);
             }
         }
-
-        queries.process(txn);
-
-        txn.abort();
     }
 }

@@ -9,54 +9,58 @@ void RelayServer::runCron() {
     cron.setupCb = []{ setThreadName("cron"); };
 
 
-    // Delete expired events
+    // Delete expired events for all tenants
 
     cron.repeat(9 * 1'000'000UL, [&]{
-        std::vector<uint64_t> expiredLevIds;
-        uint64_t numEphemeral = 0;
-        uint64_t numExpired = 0;
+        std::lock_guard<std::mutex> lock(tenantEnvsMutex);
+        
+        for (auto& [subdomain, tenantEnv] : tenantEnvs) {
+            std::vector<uint64_t> expiredLevIds;
+            uint64_t numEphemeral = 0;
+            uint64_t numExpired = 0;
 
-        {
-            auto txn = env.txn_ro();
+            {
+                auto txn = tenantEnv->txn_ro();
 
-            auto mostRecent = getMostRecentLevId(txn);
-            uint64_t now = hoytech::curr_time_s();
-            uint64_t ephemeralCutoff = now - cfg().events__ephemeralEventsLifetimeSeconds;
+                auto mostRecent = getMostRecentLevId(txn);
+                uint64_t now = hoytech::curr_time_s();
+                uint64_t ephemeralCutoff = now - cfg().events__ephemeralEventsLifetimeSeconds;
 
-            env.generic_foreachFull(txn, env.dbi_Event__expiration, lmdb::to_sv<uint64_t>(0), lmdb::to_sv<uint64_t>(0), [&](auto k, auto v) {
-                auto expiration = lmdb::from_sv<uint64_t>(k);
-                auto levId =  lmdb::from_sv<uint64_t>(v);
+                tenantEnv->generic_foreachFull(txn, tenantEnv->dbi_Event__expiration, lmdb::to_sv<uint64_t>(0), lmdb::to_sv<uint64_t>(0), [&](auto k, auto v) {
+                    auto expiration = lmdb::from_sv<uint64_t>(k);
+                    auto levId =  lmdb::from_sv<uint64_t>(v);
 
-                if (expiration > now) return false;
-                if (levId == mostRecent) return true; // don't delete because it could cause levId re-use
+                    if (expiration > now) return false;
+                    if (levId == mostRecent) return true; // don't delete because it could cause levId re-use
 
-                if (expiration == 1) { // Ephemeral event
-                    auto view = env.lookup_Event(txn, levId);
-                    if (!view) throw herr("missing event from index, corrupt DB?");
-                    uint64_t created = PackedEventView(view->buf).created_at();
+                    if (expiration == 1) { // Ephemeral event
+                        auto view = tenantEnv->lookup_Event(txn, levId);
+                        if (!view) throw herr("missing event from index, corrupt DB?");
+                        uint64_t created = PackedEventView(view->buf).created_at();
 
-                    if (created <= ephemeralCutoff) {
-                        numEphemeral++;
+                        if (created <= ephemeralCutoff) {
+                            numEphemeral++;
+                            expiredLevIds.emplace_back(levId);
+                        }
+                    } else {
+                        numExpired++;
                         expiredLevIds.emplace_back(levId);
                     }
-                } else {
-                    numExpired++;
-                    expiredLevIds.emplace_back(levId);
-                }
 
-                return true;
-            });
-        }
+                    return true;
+                });
+            }
 
-        if (expiredLevIds.size() > 0) {
-            auto txn = env.txn_rw();
-            NegentropyFilterCache neFilterCache;
+            if (expiredLevIds.size() > 0) {
+                auto txn = tenantEnv->txn_rw();
+                NegentropyFilterCache neFilterCache;
 
-            uint64_t numDeleted = deleteEvents(txn, neFilterCache, expiredLevIds);
+                uint64_t numDeleted = deleteEvents(txn, neFilterCache, expiredLevIds);
 
-            txn.commit();
+                txn.commit();
 
-            if (numDeleted) LI << "Deleted " << numDeleted << " events (ephemeral=" << numEphemeral << " expired=" << numExpired << ")";
+                if (numDeleted) LI << "Deleted " << numDeleted << " events for subdomain " << subdomain << " (ephemeral=" << numEphemeral << " expired=" << numExpired << ")";
+            }
         }
     });
 

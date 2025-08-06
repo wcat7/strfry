@@ -25,6 +25,7 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
         uint64_t connId;
         uint64_t connectedTimestamp;
         std::string ipAddr;
+        std::string subdomain;  // Store subdomain for multi-tenant support
         struct Stats {
             uint64_t bytesUp = 0;
             uint64_t bytesUpCompressed = 0;
@@ -195,6 +196,11 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
 
         Connection *c = new Connection(ws, connId);
 
+        // Extract subdomain from host header and path for multi-tenant support
+        std::string host = req.getHeader("host").toString();
+        std::string path = req.getUrl().toString();
+        c->subdomain = extractSubdomain(host, path);
+
         if (cfg().relay__realIpHeader.size()) {
             auto header = req.getHeader(cfg().relay__realIpHeader.c_str()).toString(); // not string_view: parseIP needs trailing 0 byte
 
@@ -214,6 +220,7 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
         bool compEnabled, compSlidingWindow;
         ws->getCompressionState(compEnabled, compSlidingWindow);
         LI << "[" << connId << "] Connect from " << renderIP(c->ipAddr)
+           << " subdomain=" << c->subdomain
            << " compression=" << (compEnabled ? 'Y' : 'N')
            << " sliding=" << (compSlidingWindow ? 'Y' : 'N')
         ;
@@ -259,7 +266,7 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
         c.stats.bytesDown += length;
         c.stats.bytesDownCompressed += compressedSize;
 
-        tpIngester.dispatch(c.connId, MsgIngester{MsgIngester::ClientMessage{c.connId, c.ipAddr, std::string(message, length)}});
+        tpIngester.dispatch(c.connId, MsgIngester{MsgIngester::ClientMessage{c.connId, c.ipAddr, c.subdomain, std::string(message, length)}});
     });
 
 
