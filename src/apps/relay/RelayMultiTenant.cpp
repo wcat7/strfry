@@ -106,6 +106,9 @@ defaultDb::environment& RelayServer::getTenantEnv(const std::string& subdomain) 
         if (!s) {
             newEnv->insert_Meta(txn, CURR_DB_VERSION, 1, 1);
             newEnv->insert_NegentropyFilter(txn, "{}");
+                        
+            // Set up Negentropy database for this tenant
+            negentropy::storage::BTreeLMDB::setupDB(txn, "negentropy");
         }
         
         txn.commit();

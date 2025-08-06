@@ -44,7 +44,7 @@ void RelayServer::runWriter(ThreadPool<MsgWriter>::Thread &thr) {
                 auto res = writePolicyPlugin.acceptEvent(cfg().relay__writePolicy__plugin, evJson, sourceType, msg->ipAddr, okMsg);
 
                 if (res == PluginEventSifterResult::Accept) {
-                    newEvents.emplace_back(std::move(msg->packedStr), std::move(msg->jsonStr), msg);
+                    newEvents.emplace_back(msg->packedStr, msg->jsonStr, msg);
                 } else {
                     PackedEventView packed(msg->packedStr);
                     auto eventIdHex = to_hex(packed.id());
@@ -91,32 +91,33 @@ void RelayServer::runWriter(ThreadPool<MsgWriter>::Thread &thr) {
         }
 
         // Log
+        for (auto &[subdomain, events] : eventsBySubdomain) { // Iterate over the events that were actually processed
+            for (auto &newEvent : events) { // Iterate over the events that were actually processed
+                PackedEventView packed(newEvent.packedStr);
+                auto eventIdHex = to_hex(packed.id());
+                std::string message;
+                bool written = false;
 
-        for (auto &newEvent : newEvents) {
-            PackedEventView packed(newEvent.packedStr);
-            auto eventIdHex = to_hex(packed.id());
-            std::string message;
-            bool written = false;
+                if (newEvent.status == EventWriteStatus::Written) {
+                    LI << "Inserted event. id=" << eventIdHex << " levId=" << newEvent.levId;
+                    written = true;
+                } else if (newEvent.status == EventWriteStatus::Duplicate) {
+                    message = "duplicate: have this event";
+                    written = true;
+                } else if (newEvent.status == EventWriteStatus::Replaced) {
+                    message = "replaced: have newer event";
+                } else if (newEvent.status == EventWriteStatus::Deleted) {
+                    message = "deleted: user requested deletion";
+                }
 
-            if (newEvent.status == EventWriteStatus::Written) {
-                LI << "Inserted event. id=" << eventIdHex << " levId=" << newEvent.levId;
-                written = true;
-            } else if (newEvent.status == EventWriteStatus::Duplicate) {
-                message = "duplicate: have this event";
-                written = true;
-            } else if (newEvent.status == EventWriteStatus::Replaced) {
-                message = "replaced: have newer event";
-            } else if (newEvent.status == EventWriteStatus::Deleted) {
-                message = "deleted: user requested deletion";
+                if (newEvent.status != EventWriteStatus::Written) {
+                    LI << "Rejected event. " << message << ", id=" << eventIdHex;
+                }
+
+                MsgWriter::AddEvent *addEventMsg = static_cast<MsgWriter::AddEvent*>(newEvent.userData);
+
+                sendOKResponse(addEventMsg->connId, eventIdHex, written, message);
             }
-
-            if (newEvent.status != EventWriteStatus::Written) {
-                LI << "Rejected event. " << message << ", id=" << eventIdHex;
-            }
-
-            MsgWriter::AddEvent *addEventMsg = static_cast<MsgWriter::AddEvent*>(newEvent.userData);
-
-            sendOKResponse(addEventMsg->connId, eventIdHex, written, message);
         }
     }
 }
